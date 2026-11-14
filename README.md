@@ -1,6 +1,6 @@
 # AK650
 
-Linux tool for the Ajazz AK650 keyboard. It puts your own image or GIF on the 128×128 screen and sets the keyboard's clock. Ajazz only ships a Windows driver for that.
+Linux tool for the Ajazz AK650 keyboard. It puts your own image or GIF on the 128×128 screen, sets the key lighting and keeps the keyboard's clock right. Ajazz only ships a Windows driver for that.
 
 Tested on a wired AK650 (bcdDevice 1.05): GIF upload and clock sync both work. Nobody had reverse-engineered this board, but its vendor HID descriptors are byte-identical to the AK820 Pro's, and the same upload sequence works.
 
@@ -54,6 +54,20 @@ Every upload rewrites the stored animation in flash, so don't put it on a timer.
 
 The keyboard keeps its own clock, and on Windows the Ajazz driver sets it. On Linux nothing does, so it shows whatever it had. `ak650 time` sets it once. The second line of the udev rule starts `ak650-time.service` in your user session every time the board is plugged in over USB, so it gets fixed on each plug-in without you doing anything. Check that with `journalctl --user -u ak650-time`.
 
+## Lighting
+
+```
+ak650 light list                          # the 20 effects
+ak650 light static --color 00ffff
+ak650 light breath --color ff8800 --speed 4
+ak650 light rolling --direction right     # no --color means rainbow
+ak650 light off
+```
+
+`--brightness` and `--speed` go from 0 to 5, default 5 and 3. Without `--color` an effect cycles through rainbow colours, except `static`, which is white. `scrolling` goes up or down; `rolling`, `flowing` and `tilt` go left or right. The effect names come from the AK820 driver.
+
+Every change is written to the keyboard's flash, the same as an image upload, so don't change it from a script every few seconds.
+
 ## F keys
 
 The AK650 has no F row; Fn+1 to Fn+= send F1 to F12. On Linux they come out as brightness and volume keys instead. The board uses an Apple USB ID, so the kernel's `hid-apple` driver treats it as a Mac keyboard with media keys first. To get plain F keys:
@@ -70,6 +84,8 @@ The first line is for every boot, the second applies it now.
 The board enumerates as `05ac:024f`, Apple's Aluminium Keyboard ID, with `SONiX` / `AK650` as its USB strings. That's why the udev rule matches on the strings. It has two vendor interfaces: 0xFF13 takes 64-byte feature reports for commands, 0xFF68 takes 4096-byte output reports for pixel data.
 
 An upload is START (`04 18`), image config (`04 72 <slot>`, chunk count at bytes 8–9), the payload in 4 KiB chunks with an input-report ack after each one, then COMMIT (`04 02`). The payload is a 256-byte header (frame count, then one delay byte per frame) followed by 128×128 RGB565 little-endian frames, padded with 0xFF. Every command waits 35 ms first; the board drops commands that come faster.
+
+Settings are one transaction each: START, the setting's command (`04 13` lighting, `04 28` clock), one 64-byte data packet, COMMIT, then FINISH (`04 F0`). The lighting packet is the effect number, RGB, a rainbow flag, brightness, speed and direction. The AK820 tools send a steady colour as breathing at speed 0, but on the AK650 that still breathes; effect `01` is the steady one.
 
 One Linux gotcha: on devices without report IDs, hidraw treats a leading 0x00 as the report ID and strips it. So every chunk goes out with an extra 0x00 in front, otherwise any chunk starting with a black pixel arrives a byte short.
 

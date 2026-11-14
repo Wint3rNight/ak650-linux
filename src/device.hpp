@@ -1,6 +1,5 @@
 #pragma once
 
-#include <array>
 #include <atomic>
 #include <cstdint>
 #include <ctime>
@@ -9,12 +8,11 @@
 #include <string>
 
 #include "error.hpp"
+#include "packet.hpp"
 
 namespace ak650 {
 
 inline constexpr std::size_t kChunk = 4096;
-
-using Packet = std::array<std::uint8_t, 64>;
 
 struct Interfaces {
     std::string control;  // 0xFF13: 64-byte feature reports, commands
@@ -46,12 +44,15 @@ public:
     // payload is what image.hpp's encode() returns: a multiple of kChunk bytes.
     void upload(std::span<const std::uint8_t> payload, int slot);
     void sync_clock(const std::tm& now);
+    // effect is what lighting.hpp's lighting_packet() returns.
+    void set_lighting(const Packet& effect);
 
 private:
     Packet exchange(const Packet& packet);
     void command(std::uint8_t cmd, std::uint8_t sub = 0, std::uint16_t value = 0);
     void drain();
     std::optional<Packet> send_chunk(std::span<const std::uint8_t> chunk);
+    void write_setting(std::uint8_t cmd, const Packet& data);
 
     Interfaces paths_;
     int ctrl_ = -1;

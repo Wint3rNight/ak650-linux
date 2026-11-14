@@ -15,6 +15,7 @@
 
 #include "device.hpp"
 #include "image.hpp"
+#include "lighting.hpp"
 
 using namespace ak650;
 
@@ -28,6 +29,8 @@ const char* const kUsage =
     "  ak650 screen upload FILE     send an image or GIF to the screen\n"
     "  ak650 screen preview FILE    write a GIF of what upload would send, no keyboard needed\n"
     "  ak650 time                   set the keyboard clock to the system time\n"
+    "  ak650 light EFFECT           set the key lighting (saved on the keyboard)\n"
+    "  ak650 light list             list the effects\n"
     "\n"
     "options:\n"
     "  -v, --verbose           print every packet exchange\n"
@@ -37,6 +40,10 @@ const char* const kUsage =
     "  --slot 1|2|3            image slot for upload (default 1, what the vendor driver uses)\n"
     "  -o, --output PATH       where preview writes its GIF (default <name>-ak650.gif)\n"
     "  --raw PATH              preview also writes the exact bytes upload would send\n"
+    "  --color RRGGBB          light: one colour instead of rainbow\n"
+    "  --brightness 0-5        light: default 5\n"
+    "  --speed 0-5             light: default 3\n"
+    "  --direction DIR         light: left/right or up/down, for the effects that move\n"
     "\n"
     "FILE is a GIF, PNG, JPG, BMP or TGA. Wired USB only.\n";
 
@@ -53,6 +60,7 @@ struct Options {
     int slot = 1;
     std::string output;
     std::string raw;
+    Lighting lighting;
 };
 
 int to_int(const std::string& text, const char* what, int lo, int hi) {
@@ -94,6 +102,14 @@ Options parse(int argc, char** argv) {
             opt.output = value();
         } else if (arg == "--raw") {
             opt.raw = value();
+        } else if (arg == "--color" || arg == "--colour") {
+            opt.lighting.color = parse_color(value());
+        } else if (arg == "--brightness") {
+            opt.lighting.brightness = to_int(value(), "--brightness", 0, 5);
+        } else if (arg == "--speed") {
+            opt.lighting.speed = to_int(value(), "--speed", 0, 5);
+        } else if (arg == "--direction") {
+            opt.lighting.direction = parse_direction(value());
         } else {
             throw UsageError{"unknown option " + arg};
         }
@@ -175,10 +191,34 @@ int cmd_time(const Options& opt) {
     return 0;
 }
 
+int cmd_light_list() {
+    for (const Effect& effect : effects()) {
+        std::string directions;
+        for (Direction d : effect.directions)
+            directions += std::format("{}{}", directions.empty() ? "  (" : "/", direction_name(d));
+        if (!directions.empty()) directions += ")";
+        std::printf("  %.*s%s\n", static_cast<int>(effect.name.size()), effect.name.data(), directions.c_str());
+    }
+    return 0;
+}
+
+int cmd_light(const Options& opt, const std::string& effect) {
+    Lighting lighting = opt.lighting;
+    lighting.effect = effect;
+    const Packet packet = lighting_packet(lighting);
+    Keyboard keyboard(opt.verbose);
+    keyboard.set_lighting(packet);
+    std::printf("Lighting set to %s\n", effect.c_str());
+    return 0;
+}
+
 int run(const Options& opt) {
     const auto& w = opt.words;
     if (w.size() == 1 && w[0] == "probe") return cmd_probe(opt);
     if (w.size() == 1 && w[0] == "time") return cmd_time(opt);
+    if (w.size() == 2 && w[0] == "light" && w[1] == "list") return cmd_light_list();
+    if (w.size() == 2 && w[0] == "light") return cmd_light(opt, w[1]);
+    if (!w.empty() && w[0] == "light") throw UsageError{"expected: ak650 light EFFECT, or ak650 light list"};
     if (w.size() == 3 && w[0] == "screen" && w[1] == "upload") return cmd_upload(opt, w[2]);
     if (w.size() == 3 && w[0] == "screen" && w[1] == "preview") return cmd_preview(opt, w[2]);
     if (!w.empty() && w[0] == "screen") throw UsageError{"expected: ak650 screen upload|preview FILE"};

@@ -12,6 +12,7 @@ endif()
 add_library(ak650core STATIC
   src/device.cpp
   src/image.cpp
+  src/lighting.cpp
   src/third_party.cpp)
 target_include_directories(ak650core PUBLIC src)
 target_include_directories(ak650core SYSTEM PRIVATE third_party)
@@ -33,4 +34,8 @@ if(BUILD_TESTING)
   target_compile_definitions(ak650_tests PRIVATE
     TEST_PATTERN="${CMAKE_SOURCE_DIR}/test-pattern.gif")
   add_test(NAME image COMMAND ak650_tests)
+
+  add_executable(ak650_lighting_tests tests/test_lighting.cpp)
+  target_link_libraries(ak650_lighting_tests PRIVATE ak650core)
+  add_test(NAME lighting COMMAND ak650_lighting_tests)
 endif()

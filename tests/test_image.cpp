@@ -2,19 +2,11 @@
 #include <cstdio>
 #include <numeric>
 
+#include "check.hpp"
 #include "image.hpp"
 
 using namespace ak650;
 
-static int failures = 0;
-
-#define CHECK(cond)                                                        \
-    do {                                                                   \
-        if (!(cond)) {                                                     \
-            std::printf("FAILED %s:%d: %s\n", __FILE__, __LINE__, #cond);  \
-            ++failures;                                                    \
-        }                                                                  \
-    } while (0)
 
 static Frame solid(std::uint8_t r, std::uint8_t g, std::uint8_t b, int delay_ms = 100) {
     Frame frame;

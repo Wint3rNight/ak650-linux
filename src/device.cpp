@@ -49,6 +49,7 @@ enum Cmd : std::uint8_t {
     Start = 0x18,
     ImageCfg = 0x72,
     Clock = 0x28,
+    Lighting = 0x13,
     Commit = 0x02,
     Finish = 0xF0,
 };
@@ -290,11 +291,19 @@ void Keyboard::sync_clock(const std::tm& now) {
     data[10] = 0x04;
     data[62] = 0xAA;
     data[63] = 0x55;
+    write_setting(Clock, data);
+}
 
+void Keyboard::set_lighting(const Packet& effect) { write_setting(Lighting, effect); }
+
+// Clock, lighting and the other settings all go START, the command, one data
+// packet, COMMIT, FINISH. FINISH also goes out after a failure; without it the
+// board refuses commands for a couple of seconds.
+void Keyboard::write_setting(std::uint8_t cmd, const Packet& data) {
     command(Start, 0, 1);
     try {
-        command(Clock, 0, 1);
-        exchange(data);
+        command(cmd, 0, 1);
+        exchange(data);  // data packets are echoed back and carry no status
         command(Commit);
     } catch (...) {
         try {
