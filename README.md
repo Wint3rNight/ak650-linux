@@ -44,7 +44,7 @@ ak650 time                        # set the keyboard clock to system time
 
 Takes GIF, PNG, JPG, BMP and TGA. `-v` prints every packet.
 
-Images get cropped to a square by default. `--fit pad` letterboxes instead and `--fit stretch` stretches. GIFs over 30 frames are thinned out evenly with the loop length kept, because nobody has measured how much the flash holds; `--max-frames` goes up to 255 if you want to find out. Delays are stored in 2 ms steps, so anything outside 2–510 ms gets clamped.
+Images get cropped to a square by default. `--fit pad` letterboxes instead and `--fit stretch` stretches. GIFs over 60 frames are thinned out evenly with the loop length kept. 60 frames is tested and takes about 70 seconds to upload; `--max-frames` goes up to 255, but nobody has measured how much the flash really holds. Delays are stored in 2 ms steps, so anything outside 2–510 ms gets clamped. The screen needs about 50 ms per frame whatever the delay says, so it tops out near 20 fps and faster GIFs play slowed down.
 
 Every upload rewrites the stored animation in flash, so don't put it on a timer. The image stays after a full power-off. Only one command talks to the keyboard at a time; a second one waits for the first.
 

@@ -32,8 +32,8 @@ const char* const kUsage =
     "options:\n"
     "  -v, --verbose           print every packet exchange\n"
     "  --fit crop|pad|stretch  crop to a square (default), pad with black, or stretch\n"
-    "  --max-frames N          drop frames evenly above N (default 30, max 255;\n"
-    "                          capacity past 30 is untested on this board)\n"
+    "  --max-frames N          drop frames evenly above N (default 60, max 255;\n"
+    "                          60 is tested, more is not)\n"
     "  --slot 1|2|3            image slot for upload (default 1, what the vendor driver uses)\n"
     "  -o, --output PATH       where preview writes its GIF (default <name>-ak650.gif)\n"
     "  --raw PATH              preview also writes the exact bytes upload would send\n"
@@ -49,7 +49,7 @@ struct Options {
     bool verbose = false;
     bool help = false;
     Fit fit = Fit::Crop;
-    int max_frames = 30;
+    int max_frames = 60;
     int slot = 1;
     std::string output;
     std::string raw;
