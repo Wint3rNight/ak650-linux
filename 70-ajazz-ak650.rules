@@ -1,0 +1,9 @@
+# Ajazz AK650: give the logged-in user access to its HID interfaces (screen, lighting).
+# Matches on the USB strings, not the ID: the board enumerates as 05ac:024f, which is
+# Apple's Aluminium Keyboard ID, and matching that alone would catch real Apple boards.
+# Named 70-* so the uaccess tag is set before 73-seat-late.rules acts on it.
+SUBSYSTEM=="hidraw", ATTRS{manufacturer}=="SONiX", ATTRS{product}=="AK650", TAG+="uaccess"
+
+# Nothing sets the keyboard's clock on Linux, so start ak650-time.service in the
+# user's systemd every time the board is plugged in over USB.
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{manufacturer}=="SONiX", ATTR{product}=="AK650", TAG+="systemd", ENV{SYSTEMD_USER_WANTS}+="ak650-time.service"

@@ -1,0 +1,9 @@
+[Unit]
+Description=Set the Ajazz AK650 clock to system time
+# Started by 70-ajazz-ak650.rules when the keyboard is plugged in over USB.
+
+[Service]
+Type=oneshot
+# The rule fires on the USB device itself, a moment before its hidraw nodes exist.
+ExecStartPre=/usr/bin/sleep 3
+ExecStart=%h/.local/bin/ak650-screen time

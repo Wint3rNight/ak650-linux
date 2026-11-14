@@ -1,0 +1,369 @@
+#!/usr/bin/env python3
+"""Put your own image or GIF on the Ajazz AK650's 128x128 screen, from Linux.
+
+The AK650 uses the same Sonix "family B" protocol as the FF13-variant AK820 Pro
+and the AKS075: 64-byte feature reports on the 0xFF13 interface for commands,
+4096-byte output reports on the 0xFF68 interface for pixel data. Sources:
+  github.com/wsclx/ak820pro-modder  docs/MACOS-800A.md, crates/ak820-protocol/src/legacy*.rs
+  github.com/aar-rafi/aks075-linux  docs/protocol.md
+
+Wired USB only. Needs read/write on the AK650's hidraw nodes (see `ak650-screen probe`).
+"""
+
+import argparse
+import fcntl
+import os
+import select
+import sys
+import time
+from datetime import datetime
+
+W = H = 128
+FRAME_BYTES = W * H * 2
+HEADER_BYTES = 256
+CHUNK = 4096
+CMD_DELAY = 0.035  # the vendor driver's cmd_delaytime; the board drops commands without it
+
+# Exact descriptors of the two vendor interfaces. These match the AK820 boards
+# where this upload path was confirmed on hardware, so we refuse anything else.
+CONTROL_DESC = bytes.fromhex(
+    "0613ff0901a101150026ff007508954009028102090391020a00ffb102c0")
+DATA_DESC = bytes.fromhex(
+    "0668ff0961a1010962150026ff009540750881020963150026ff0096001075089102c0")
+
+START, IMAGE_CFG, CLOCK, COMMIT, FINISH = 0x18, 0x72, 0x28, 0x02, 0xF0
+
+# Lives next to the script; realpath so it still resolves through the ~/.local/bin symlink.
+RULE_PATH = os.path.join(os.path.dirname(os.path.realpath(__file__)), "70-ajazz-ak650.rules")
+
+
+def _ioc_rw(nr, size):
+    return (3 << 30) | (size << 16) | (ord("H") << 8) | nr
+
+
+HIDIOCSFEATURE = _ioc_rw(0x06, 65)
+HIDIOCGFEATURE = _ioc_rw(0x07, 65)
+
+
+class Fail(Exception):
+    pass
+
+
+def find_interfaces():
+    """Return (control_path, data_path) for the one connected AK650."""
+    pairs = {}
+    base = "/sys/class/hidraw"
+    for name in sorted(os.listdir(base)):
+        dev = os.path.join(base, name, "device")
+        try:
+            uevent = open(os.path.join(dev, "uevent")).read()
+            desc = open(os.path.join(dev, "report_descriptor"), "rb").read()
+        except OSError:
+            continue
+        names = [l for l in uevent.splitlines() if l.startswith("HID_NAME=")]
+        if not names or "AK650" not in names[0]:
+            continue
+        # hidraw -> hid device -> usb interface -> usb device
+        usb_dev = os.path.realpath(os.path.join(dev, "..", ".."))
+        slot = pairs.setdefault(usb_dev, {})
+        if desc == CONTROL_DESC:
+            slot["control"] = "/dev/" + name
+        elif desc == DATA_DESC:
+            slot["data"] = "/dev/" + name
+        elif desc[:3] in (CONTROL_DESC[:3], DATA_DESC[:3]):
+            raise Fail(f"/dev/{name} is an AK650 vendor interface with an unfamiliar "
+                       "descriptor. Not touching it.")
+    found = [p for p in pairs.values() if "control" in p and "data" in p]
+    if not found:
+        raise Fail("No AK650 found. Plug it in over USB (the 2.4G dongle and Bluetooth "
+                   "don't expose the screen interfaces).")
+    if len(found) > 1:
+        raise Fail("More than one AK650 connected; unplug the extras.")
+    return found[0]["control"], found[0]["data"]
+
+
+class Keyboard:
+    def __init__(self, verbose=False):
+        self.verbose = verbose
+        self.control_path, self.data_path = find_interfaces()
+        try:
+            self.ctrl = os.open(self.control_path, os.O_RDWR)
+            self.data = os.open(self.data_path, os.O_RDWR | os.O_NONBLOCK)
+        except PermissionError:
+            raise Fail(
+                f"No permission on {self.control_path}/{self.data_path}. Install the udev rule once:\n"
+                f"  sudo install -m644 {RULE_PATH} /etc/udev/rules.d/ && "
+                "sudo udevadm control --reload && sudo udevadm trigger --subsystem-match=hidraw")
+
+    def close(self):
+        os.close(self.ctrl)
+        os.close(self.data)
+
+    def log(self, msg):
+        if self.verbose:
+            print("  " + msg, file=sys.stderr)
+
+    def exchange(self, packet):
+        """SET_FEATURE a 64-byte packet, then GET_FEATURE the board's reply."""
+        time.sleep(CMD_DELAY)
+        fcntl.ioctl(self.ctrl, HIDIOCSFEATURE, b"\x00" + bytes(packet).ljust(64, b"\x00"))
+        time.sleep(0.05)
+        buf = bytearray(65)
+        n = fcntl.ioctl(self.ctrl, HIDIOCGFEATURE, buf, True)
+        reply = bytes(buf[1:])
+        self.log(f"> {bytes(packet[:10]).hex(' ')}  < {reply[:10].hex(' ')} ({n})")
+        return reply
+
+    def command(self, cmd, sub=0, value=0):
+        pkt = bytearray(64)
+        pkt[0], pkt[1], pkt[2] = 4, cmd, sub
+        pkt[8:10] = value.to_bytes(2, "little")
+        if cmd == START:
+            # A board still busy with a previous write answers all zeroes or status FF.
+            for _ in range(10):
+                reply = self.exchange(pkt)
+                if not (reply == bytes(64) or reply[:4] == bytes([4, START, 0, 0xFF])):
+                    break
+                time.sleep(0.3)
+        else:
+            reply = self.exchange(pkt)
+        if reply[0] != 4 or reply[1] != cmd or reply[3] != 1:
+            raise Fail(f"Keyboard refused command {cmd:02x} (reply {reply[:9].hex(' ')})")
+
+    def drain(self):
+        while select.select([self.data], [], [], 0)[0]:
+            try:
+                os.read(self.data, 64)
+            except BlockingIOError:
+                break
+
+    def send_chunk(self, chunk):
+        # hidraw eats a leading 0x00 as the report ID on boards without report IDs,
+        # so always give it one; otherwise any chunk starting with 00 arrives 1 byte short.
+        if os.write(self.data, b"\x00" + chunk) != CHUNK + 1:
+            raise Fail("Short write to the screen interface")
+        if not select.select([self.data], [], [], 1.0)[0]:
+            return None
+        return os.read(self.data, 64)
+
+    def upload(self, payload, slot):
+        chunks = len(payload) // CHUNK
+        self.drain()
+        self.command(START)
+        try:
+            self.command(IMAGE_CFG, slot, chunks)
+            for i in range(chunks):
+                ack = self.send_chunk(payload[i * CHUNK:(i + 1) * CHUNK])
+                if ack is None:
+                    raise Fail(f"No ack for chunk {i + 1}/{chunks}; stopped without saving")
+                if i == 0:
+                    self.log(f"first ack: {ack[:8].hex(' ')}")
+                print(f"\r  sending {i + 1}/{chunks}", end="", flush=True)
+            print()
+            # No FINISH on success: the vendor driver doesn't send one, and on the
+            # AKS075 it restarts the built-in animation.
+            self.command(COMMIT)
+        except BaseException:
+            print()
+            try:
+                self.command(FINISH, 0, 1)
+            except Exception:
+                pass
+            raise
+
+    def sync_clock(self, now):
+        data = bytearray(64)
+        data[1:9] = bytes([1, 0x5A, now.year % 100, now.month, now.day,
+                           now.hour, now.minute, now.second])
+        data[10] = 4
+        data[62:64] = b"\xAA\x55"
+        self.command(START, 0, 1)
+        try:
+            self.command(CLOCK, 0, 1)
+            self.exchange(data)
+            self.command(COMMIT)
+        finally:
+            self.command(FINISH, 0, 1)
+
+
+def load_frames(path, fit, max_frames):
+    """Return [(PIL RGB 128x128 image, delay_ms)] ready to encode."""
+    from PIL import Image, ImageOps, ImageSequence, UnidentifiedImageError
+
+    try:
+        src = Image.open(path)
+    except FileNotFoundError:
+        hint = ""
+        if "\\ " in path:
+            # "a\ b" inside quotes keeps the backslash, so the name never matches.
+            hint = "\nThe path has backslashes before its spaces. Use quotes or backslashes, not both."
+        raise Fail(f"No such file: {path}{hint}")
+    except UnidentifiedImageError:
+        raise Fail(f"Pillow can't read {path} as an image")
+    frames = []
+    for f in ImageSequence.Iterator(src):
+        delay = f.info.get("duration") or 100
+        rgba = f.convert("RGBA")
+        img = Image.new("RGB", rgba.size, (0, 0, 0))
+        img.paste(rgba, mask=rgba.getchannel("A"))
+        if fit == "crop":
+            img = ImageOps.fit(img, (W, H), Image.Resampling.LANCZOS)
+        elif fit == "pad":
+            img = ImageOps.pad(img, (W, H), Image.Resampling.LANCZOS, color=(0, 0, 0))
+        else:
+            img = img.resize((W, H), Image.Resampling.LANCZOS)
+        frames.append((img, int(delay)))
+
+    if len(frames) > max_frames:
+        # Keep evenly spaced frames and fold the dropped frames' time into the kept
+        # ones, so the animation runs at the same speed, just choppier.
+        n = len(frames)
+        keep = [round(i * n / max_frames) for i in range(max_frames)]
+        bounds = keep + [n]
+        frames = [(frames[k][0], sum(d for _, d in frames[k:bounds[j + 1]]))
+                  for j, k in enumerate(keep)]
+        print(f"  {n} frames is over the limit of {max_frames}; kept every ~{n / max_frames:.1f}th")
+    return frames
+
+
+def to_rgb565(img):
+    """RGB565, little-endian, row-major: what the GC9107 panel wants."""
+    from PIL import Image, ImageChops
+
+    r, g, b = img.split()
+    hi = ImageChops.add(r.point(lambda v: v & 0xF8), g.point(lambda v: v >> 5))
+    lo = ImageChops.add(g.point(lambda v: (v << 3) & 0xE0), b.point(lambda v: v >> 3))
+    return Image.merge("LA", (lo, hi)).tobytes()
+
+
+def device_delay(ms):
+    """The header stores delays in 2 ms units, one byte each: 2..510 ms."""
+    return max(1, min(255, round(ms / 2)))
+
+
+def encode(frames):
+    header = bytearray(b"\xFF" * HEADER_BYTES)
+    header[0] = len(frames)
+    if len(frames) == 1:
+        header[1] = 0
+    else:
+        for i, (_, ms) in enumerate(frames):
+            header[1 + i] = device_delay(ms)
+    payload = header + b"".join(to_rgb565(img) for img, _ in frames)
+    payload += b"\xFF" * (-len(payload) % CHUNK)
+    return bytes(payload)
+
+
+def save_preview(frames, out):
+    """Write what the screen will show: 565 colour depth and 2 ms delay steps."""
+    from PIL import Image
+
+    shown = []
+    for img, _ in frames:
+        r, g, b = img.split()
+        shown.append(Image.merge("RGB", (r.point(lambda v: v & 0xF8),
+                                             g.point(lambda v: v & 0xFC),
+                                             b.point(lambda v: v & 0xF8))))
+    durations = [device_delay(ms) * 2 for _, ms in frames]
+    if len(shown) == 1:
+        shown[0].save(out)
+    else:
+        shown[0].save(out, save_all=True, append_images=shown[1:], duration=durations,
+                      loop=0, disposal=1, optimize=False)
+
+
+def cmd_probe(args):
+    control, data = find_interfaces()
+    print(f"AK650 found\n  control (0xFF13): {control}\n  data    (0xFF68): {data}")
+    ok = all(os.access(p, os.R_OK | os.W_OK) for p in (control, data))
+    if not ok:
+        print(f"\nNo read/write access yet. Install the udev rule once:\n"
+              f"  sudo install -m644 {RULE_PATH} /etc/udev/rules.d/ && "
+              "sudo udevadm control --reload && sudo udevadm trigger --subsystem-match=hidraw")
+        return 1
+    kb = Keyboard(args.verbose)
+    try:
+        buf = bytearray(65)
+        fcntl.ioctl(kb.ctrl, HIDIOCGFEATURE, buf, True)  # read-only
+        print(f"  feature read ok: {bytes(buf[1:11]).hex(' ')}")
+    finally:
+        kb.close()
+    print("Ready to upload.")
+    return 0
+
+
+def cmd_preview(args):
+    frames = load_frames(args.file, args.fit, args.max_frames)
+    out = args.output or os.path.splitext(os.path.basename(args.file))[0] + "-ak650.gif"
+    save_preview(frames, out)
+    total = sum(device_delay(ms) * 2 for _, ms in frames)
+    print(f"{len(frames)} frame(s), {total} ms per loop -> {out}")
+    return 0
+
+
+def cmd_upload(args):
+    frames = load_frames(args.file, args.fit, args.max_frames)
+    payload = encode(frames)
+    chunks = len(payload) // CHUNK
+    print(f"{len(frames)} frame(s), {chunks} chunks of 4 KiB, slot {args.slot}")
+    kb = Keyboard(args.verbose)
+    try:
+        t = time.monotonic()
+        kb.upload(payload, args.slot)
+    finally:
+        kb.close()
+    print(f"Done in {time.monotonic() - t:.1f}s. If the screen still shows the clock or the "
+          "stock animation, switch screen pages with the knob.")
+    return 0
+
+
+def cmd_time(args):
+    kb = Keyboard(args.verbose)
+    try:
+        now = datetime.now()
+        kb.sync_clock(now)
+    finally:
+        kb.close()
+    print(f"Clock set to {now:%Y-%m-%d %H:%M:%S}")
+    return 0
+
+
+def main():
+    p = argparse.ArgumentParser(prog="ak650-screen", description=__doc__.split("\n")[0])
+    p.add_argument("-v", "--verbose", action="store_true", help="print every packet exchange")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("probe", help="find the keyboard and check access (read-only)")
+
+    for name, helptext in (("upload", "send an image or GIF to the screen"),
+                           ("preview", "write a GIF of what upload would send, without touching the keyboard")):
+        s = sub.add_parser(name, help=helptext)
+        s.add_argument("file", help="GIF, PNG, JPG, WebP, ...")
+        s.add_argument("--fit", choices=["crop", "pad", "stretch"], default="crop",
+                       help="crop to square (default), pad with black, or stretch")
+        s.add_argument("--max-frames", type=int, default=30,
+                       help="drop frames evenly above this (default 30; capacity beyond "
+                            "that is untested on this board, hard max 255)")
+        if name == "upload":
+            s.add_argument("--slot", type=int, choices=[1, 2, 3], default=1,
+                           help="custom image slot (default 1, which is what the vendor driver uses)")
+        else:
+            s.add_argument("-o", "--output", help="output GIF path")
+
+    sub.add_parser("time", help="set the keyboard clock to the system time")
+
+    args = p.parse_args()
+    if getattr(args, "max_frames", 1) not in range(1, 256):
+        p.error("--max-frames must be 1..255")
+    try:
+        return {"probe": cmd_probe, "upload": cmd_upload,
+                "preview": cmd_preview, "time": cmd_time}[args.cmd](args)
+    except Fail as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())
