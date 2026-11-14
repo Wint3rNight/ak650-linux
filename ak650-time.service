@@ -6,4 +6,4 @@ Description=Set the Ajazz AK650 clock to system time
 Type=oneshot
 # The rule fires on the USB device itself, a moment before its hidraw nodes exist.
 ExecStartPre=/usr/bin/sleep 3
-ExecStart=%h/.local/bin/ak650-screen time
+ExecStart=%h/.local/bin/ak650 time
